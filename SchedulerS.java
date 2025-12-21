@@ -1,35 +1,58 @@
 
 import java.util.*;
 
-class Process {
-    String name;
-    int arrival;
-    int burst;
-    int remaining;
-    int finishTime;
-    int waitingTime;
-    int turnaroundTime;
-    int priority;
-    int waitingCounter; // for aging
+public class SchedulerS {
 
-    Process(String name, int arrival, int burst, int priority) {
-        this.name = name;
-        this.arrival = arrival;
-        this.burst = burst;
-        this.remaining = burst;
-        this.priority = priority;
-        this.waitingCounter = 0;
+    static final class Process {
+        final String name;
+        final int arrival;
+        final int burst;
+        final int basePriority;
+
+        int remaining;
+
+        // Per your method:
+        // - newPriority: priority after updates (aging)
+        // - newArrival: the time this process last (re-)entered the ready/waiting queue
+        int newPriority;
+        int newArrival;
+
+        Integer completionTime; // set when finished
+
+        Process(String name, int arrival, int burst, int priority) {
+            this.name = name;
+            this.arrival = arrival;
+            this.burst = burst;
+            this.basePriority = priority;
+            this.remaining = burst;
+
+            this.newPriority = priority;
+            this.newArrival = 0;
+        }
     }
-}
 
-public class SchedulerSys {
+    private static int compare(Process a, Process b) {
+        if (a.newPriority != b.newPriority) return Integer.compare(a.newPriority, b.newPriority); // lower is better
+        if (a.arrival != b.arrival) return Integer.compare(a.arrival, b.arrival); // earlier arrival wins ties
+        return a.name.compareTo(b.name);
+    }
+
+    private static Process bestOf(List<Process> ready) {
+        if (ready.isEmpty()) return null;
+        Process best = ready.get(0);
+        for (int i = 1; i < ready.size(); i++) {
+            Process p = ready.get(i);
+            if (compare(p, best) < 0) best = p;
+        }
+        return best;
+    }
 
     public static void main(String[] args) {
         Scanner sc = new Scanner(System.in);
 
         ArrayList<Process> processes = new ArrayList<>();
-        ArrayList<Process> readyQueue = new ArrayList<>();
-        ArrayList<String> executionOrder = new ArrayList<>();
+        ArrayList<Process> ready = new ArrayList<>();
+        ArrayList<String> executionOrder = new ArrayList<>(); // dispatch order (not per-tick timeline)
 
         System.out.print("Number of processes: ");
         int n = sc.nextInt();
@@ -54,95 +77,155 @@ public class SchedulerSys {
             processes.add(new Process(name, arrival, burst, priority));
         }
 
+        // Sort by arrival for efficient intake.
+        processes.sort(Comparator.comparingInt(p -> p.arrival));
+
         int time = 0;
         int completed = 0;
-        Process lastProcess = null; // for context switching
+        int nextArrivalIdx = 0;
+
+        boolean hasEverRun = false; // to avoid context switch before the very first run at time 0
+
+        Process running = null; // currently executing
+        Process target = null;  // the process we're context-switching to (not running yet)
+        int csRemaining = 0;    // remaining context switch time units
 
         while (completed < n) {
-
-            // Add arrived processes to ready queue
-            for (Process p : processes) {
-                if (p.arrival <= time && p.remaining > 0 && !readyQueue.contains(p)) {
-                    readyQueue.add(p);
-                }
+            // 1) Add newly arrived processes at this exact time.
+            while (nextArrivalIdx < processes.size() && processes.get(nextArrivalIdx).arrival == time) {
+                Process p = processes.get(nextArrivalIdx);
+                p.newPriority = p.basePriority;
+                p.newArrival = time; // initial newarrival = arrival time
+                ready.add(p);
+                nextArrivalIdx++;
             }
 
-            if (readyQueue.isEmpty()) {
-                executionOrder.add("Idle");
-                time++;
-                continue;
-            }
-
-            // Select highest priority process
-            Process current = readyQueue.get(0);
-            for (Process p : readyQueue) {
-                if (p.priority < current.priority ||
-                   (p.priority == current.priority && p.arrival < current.arrival)) {
-                    current = p;
-                }
-            }
-
-            // Context Switch check
-            if (lastProcess != null && lastProcess != current) {
-                for (int i = 0; i < contextSwitchTime; i++) {
-                    executionOrder.add("CS");
-                    time++;
-                }
-            }
-
-            lastProcess = current;
-
-            // Reset waiting counter for running process
-            current.waitingCounter = 0;
-
-            // Execute for 1 time unit
-            executionOrder.add(current.name);
-            current.remaining--;
-
-            // Aging
-            for (Process p : readyQueue) {
-                if (p != current) {
-                    p.waitingCounter++;
-                    if (p.waitingCounter == agingInterval) {
-                        p.priority = Math.max(0, p.priority - 1);
-                        p.waitingCounter = 0;
+            // 2) Per-process aging (only for ready/waiting queue).
+            if (agingInterval > 0) {
+                for (Process p : ready) {
+                    int waited = time - p.newArrival;
+                    if (waited >= agingInterval && p.newPriority > 1) {
+                        p.newPriority -= 1;
+                        p.newArrival = time;
                     }
                 }
             }
 
-            // If finished
-            if (current.remaining == 0) {
-                completed++;
-                current.finishTime = time + 1;
-                readyQueue.remove(current);
+            // 3) Re-evaluate the chosen target each second (even during CS).
+            //    This matches your rule: "each second check arrivals/aging and re-select if needed".
+            if (running == null && target != null) {
+                Process bestReady = bestOf(ready);
+                if (bestReady != null && compare(bestReady, target) < 0) {
+                    // Cancel the current target and restart context switch to the better one.
+                    target.newArrival = time; // e.g., P4 newarrival becomes 9 in your example
+                    ready.add(target);
+
+                    ready.remove(bestReady);
+                    target = bestReady;
+                    csRemaining = contextSwitchTime;
+                    executionOrder.add(target.name);
+                }
             }
 
+            // 4) Preemption check (running can be preempted by higher priority OR equal priority with earlier arrival).
+            if (running != null) {
+                Process bestReady = bestOf(ready);
+                if (bestReady != null && compare(bestReady, running) < 0) {
+                    // Preempt running.
+                    running.newArrival = time; // time where we last worked on it (it leaves CPU now)
+                    ready.add(running);
+                    running = null;
+
+                    ready.remove(bestReady);
+                    target = bestReady;
+                    csRemaining = contextSwitchTime;
+                    executionOrder.add(target.name);
+                }
+            }
+
+            // 5) If CPU is idle and not currently context-switching, pick next process.
+            if (running == null && csRemaining == 0 && target == null) {
+                Process next = bestOf(ready);
+                if (next != null) {
+                    ready.remove(next);
+
+                    if (!hasEverRun) {
+                        // First ever dispatch: start immediately (no context switch).
+                        running = next;
+                        executionOrder.add(running.name);
+                        hasEverRun = true;
+                    } else {
+                        target = next;
+                        csRemaining = contextSwitchTime;
+                        executionOrder.add(target.name);
+                    }
+                }
+            }
+
+            // 5b) If CS is finished and we still have a target, start running it now.
+            //      (Runs after the per-second checks at this exact time.)
+            if (running == null && csRemaining == 0 && target != null) {
+                running = target;
+                target = null;
+                hasEverRun = true;
+            }
+
+            // 6) Execute one second: either run, or context switch, or idle.
+            if (running != null) {
+                running.remaining--;
+                time++;
+
+                if (running.remaining == 0) {
+                    running.completionTime = time;
+                    completed++;
+                    running = null;
+                }
+                continue;
+            }
+
+            if (csRemaining > 0) {
+                csRemaining--;
+                time++;
+                continue;
+            }
+
+            // Idle for one second.
             time++;
+
+            // If CPU is idle and we just advanced time, loop continues to process arrivals/aging.
         }
 
         // Calculate WT & TAT
         int totalWT = 0, totalTAT = 0;
 
+        // Keep original input order in output by sorting by arrival then name for stability.
+        processes.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
+
+        Map<String, Integer> waitingTimeByName = new LinkedHashMap<>();
+        Map<String, Integer> turnaroundTimeByName = new LinkedHashMap<>();
+
         for (Process p : processes) {
-            p.turnaroundTime = p.finishTime - p.arrival;
-            p.waitingTime = p.turnaroundTime - p.burst;
-            totalWT += p.waitingTime;
-            totalTAT += p.turnaroundTime;
+            int turnaround = p.completionTime - p.arrival;
+            int waiting = turnaround - p.burst;
+            waitingTimeByName.put(p.name, waiting);
+            turnaroundTimeByName.put(p.name, turnaround);
+            totalWT += waiting;
+            totalTAT += turnaround;
         }
 
-        System.out.println("\nExecution Order:");
-        System.out.println(executionOrder);
+        System.out.println("\nexecutionOrder: " + executionOrder);
 
-        System.out.println("\nProcess Results:");
+        System.out.println("\nprocessResults:");
         for (Process p : processes) {
             System.out.println(
-                "Process " + p.name +
-                " | Waiting Time = " + p.waitingTime +
-                " | Turnaround Time = " + p.turnaroundTime
+                "{name: " + p.name +
+                    ", waitingTime: " + waitingTimeByName.get(p.name) +
+                    ", turnaroundTime: " + turnaroundTimeByName.get(p.name) +
+                    "}"
             );
         }
 
-        System.out.printf("\nAverage Waiting Time: %.2f\n", (double) totalWT / n);
-        System.out.printf("Average Turnaround Time: %.2f\n", (double) totalTAT / n);
+        System.out.printf("\naverageWaitingTime: %.2f\n", (double) totalWT / n);
+        System.out.printf("averageTurnaroundTime: %.2f\n", (double) totalTAT / n);
     }
 }
