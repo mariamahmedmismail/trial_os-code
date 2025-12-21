@@ -31,22 +31,10 @@ public class SchedulerS {
         }
     }
 
-    // Ordering used to choose the *next* process from the ready queue:
-    // - lower newPriority first
-    // - within same priority: Round Robin order by earliest newArrival (FIFO)
-    // - then original arrival, then name for determinism
-    private static int compareReady(Process a, Process b) {
-        if (a.newPriority != b.newPriority) return Integer.compare(a.newPriority, b.newPriority);
-        if (a.newArrival != b.newArrival) return Integer.compare(a.newArrival, b.newArrival);
-        if (a.arrival != b.arrival) return Integer.compare(a.arrival, b.arrival);
+    private static int compare(Process a, Process b) {
+        if (a.newPriority != b.newPriority) return Integer.compare(a.newPriority, b.newPriority); // lower is better
+        if (a.arrival != b.arrival) return Integer.compare(a.arrival, b.arrival); // earlier arrival wins ties
         return a.name.compareTo(b.name);
-    }
-
-    // Preemption rule while a process is running:
-    // - only preempt on strictly higher priority (lower number)
-    // - equal priority uses RR (quantum), so no mid-quantum preemption
-    private static boolean shouldPreempt(Process running, Process bestReady) {
-        return bestReady != null && bestReady.newPriority < running.newPriority;
     }
 
     private static Process bestOf(List<Process> ready) {
@@ -54,7 +42,7 @@ public class SchedulerS {
         Process best = ready.get(0);
         for (int i = 1; i < ready.size(); i++) {
             Process p = ready.get(i);
-            if (compareReady(p, best) < 0) best = p;
+            if (compare(p, best) < 0) best = p;
         }
         return best;
     }
@@ -74,9 +62,6 @@ public class SchedulerS {
 
         System.out.print("Enter Context Switch Time: ");
         int contextSwitchTime = sc.nextInt();
-
-        System.out.print("Enter RR Quantum: ");
-        int rrQuantum = sc.nextInt();
 
         for (int i = 0; i < n; i++) {
             System.out.println("Process " + (i + 1));
@@ -104,7 +89,6 @@ public class SchedulerS {
         Process running = null; // currently executing
         Process target = null;  // the process we're context-switching to (not running yet)
         int csRemaining = 0;    // remaining context switch time units
-        int quantumRemaining = 0; // remaining time in current RR quantum for the running process
 
         while (completed < n) {
             // 1) Add newly arrived processes at this exact time.
@@ -131,7 +115,7 @@ public class SchedulerS {
             //    This matches your rule: "each second check arrivals/aging and re-select if needed".
             if (running == null && target != null) {
                 Process bestReady = bestOf(ready);
-                if (bestReady != null && compareReady(bestReady, target) < 0) {
+                if (bestReady != null && compare(bestReady, target) < 0) {
                     // Cancel the current target and restart context switch to the better one.
                     target.newArrival = time; // e.g., P4 newarrival becomes 9 in your example
                     ready.add(target);
@@ -143,15 +127,17 @@ public class SchedulerS {
                 }
             }
 
-            // 4) Preemption check (running can be preempted only by strictly higher priority).
+            // 4) Preemption check:
+            //    preempt if a ready process has higher priority, OR same priority but earlier arrival time.
             if (running != null) {
                 Process bestReady = bestOf(ready);
-                if (shouldPreempt(running, bestReady)) {
+                if (bestReady != null
+                    && (bestReady.newPriority < running.newPriority
+                        || (bestReady.newPriority == running.newPriority && bestReady.arrival < running.arrival))) {
                     // Preempt running.
                     running.newArrival = time; // time where we last worked on it (it leaves CPU now)
                     ready.add(running);
                     running = null;
-                    quantumRemaining = 0;
 
                     ready.remove(bestReady);
                     target = bestReady;
@@ -169,7 +155,6 @@ public class SchedulerS {
                     if (!hasEverRun) {
                         // First ever dispatch: start immediately (no context switch).
                         running = next;
-                        quantumRemaining = Math.max(1, rrQuantum);
                         executionOrder.add(running.name);
                         hasEverRun = true;
                     } else {
@@ -186,20 +171,17 @@ public class SchedulerS {
                 running = target;
                 target = null;
                 hasEverRun = true;
-                quantumRemaining = Math.max(1, rrQuantum);
             }
 
             // 6) Execute one second: either run, or context switch, or idle.
             if (running != null) {
                 running.remaining--;
-                quantumRemaining--;
                 time++;
 
                 if (running.remaining == 0) {
                     running.completionTime = time;
                     completed++;
                     running = null;
-                    quantumRemaining = 0;
                 }
                 continue;
             }
