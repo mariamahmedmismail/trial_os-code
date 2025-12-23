@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
  * If a process has no "quantum" field, the code will default to rrQuantum (or 4).
  */
 public class AGScheduler {
+    private static final double EPS = 0.01;
 
     static final class Process {
         final String name;
@@ -60,6 +61,30 @@ public class AGScheduler {
         }
     }
 
+    static final class Expected {
+        final List<String> executionOrder; // null if not present
+        final Double avgWT;                // null if not present
+        final Double avgTAT;               // null if not present
+
+        Expected(List<String> executionOrder, Double avgWT, Double avgTAT) {
+            this.executionOrder = executionOrder;
+            this.avgWT = avgWT;
+            this.avgTAT = avgTAT;
+        }
+    }
+
+    static final class Result {
+        final List<String> executionOrder;
+        final double avgWT;
+        final double avgTAT;
+
+        Result(List<String> executionOrder, double avgWT, double avgTAT) {
+            this.executionOrder = executionOrder;
+            this.avgWT = avgWT;
+            this.avgTAT = avgTAT;
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         List<File> files = collectJsonFiles(args);
         if (files.isEmpty()) {
@@ -71,13 +96,15 @@ public class AGScheduler {
         for (File f : files) {
             String json = new String(Files.readAllBytes(Paths.get(f.getAbsolutePath())));
             Input in = parse(json);
+            Expected expected = parseExpected(json);
             System.out.println("\n=== " + f.getName() + " ===");
-            solveAG(in.processes, in.contextSwitch, in.rrQuantum);
+            Result actual = solveAG(in.processes, in.contextSwitch, in.rrQuantum);
+            printPassFail(expected, actual);
         }
     }
 
     // ------------------ AG logic (based on your AGScheduler simulation style) ------------------
-    private static void solveAG(List<Process> processes, int contextSwitch, int defaultQuantum) {
+    private static Result solveAG(List<Process> processes, int contextSwitch, int defaultQuantum) {
         processes.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
 
         ArrayList<Process> incoming = new ArrayList<>(processes);
@@ -248,6 +275,36 @@ public class AGScheduler {
         for (Process p : finished) {
             System.out.println(p.name + ": " + p.quantumHistory);
         }
+
+        return new Result(order, totalWT / finished.size(), totalTAT / finished.size());
+    }
+
+    private static void printPassFail(Expected expected, Result actual) {
+        if (expected.executionOrder == null && expected.avgWT == null && expected.avgTAT == null) {
+            System.out.println("testStatus: (no expected output in JSON)");
+            return;
+        }
+
+        boolean ok = true;
+        if (expected.executionOrder != null && !expected.executionOrder.equals(actual.executionOrder)) ok = false;
+        if (expected.avgWT != null && Math.abs(expected.avgWT - actual.avgWT) > EPS) ok = false;
+        if (expected.avgTAT != null && Math.abs(expected.avgTAT - actual.avgTAT) > EPS) ok = false;
+
+        System.out.println("testStatus: " + (ok ? "PASSED" : "FAILED"));
+        if (!ok) {
+            if (expected.executionOrder != null) {
+                System.out.println("  expected executionOrder: " + expected.executionOrder);
+                System.out.println("  actual   executionOrder: " + actual.executionOrder);
+            }
+            if (expected.avgWT != null) {
+                System.out.printf("  expected averageWaitingTime: %.2f%n", expected.avgWT);
+                System.out.printf("  actual   averageWaitingTime: %.2f%n", actual.avgWT);
+            }
+            if (expected.avgTAT != null) {
+                System.out.printf("  expected averageTurnaroundTime: %.2f%n", expected.avgTAT);
+                System.out.printf("  actual   averageTurnaroundTime: %.2f%n", actual.avgTAT);
+            }
+        }
     }
 
     // ------------------ JSON parsing (regex-based) ------------------
@@ -277,9 +334,35 @@ public class AGScheduler {
         return new Input(contextSwitch, rrQuantum, processes);
     }
 
+    private static Expected parseExpected(String json) {
+        List<String> order = extractStringArray(json, "executionOrder");
+        Double avgWT = extractDouble(json, "averageWaitingTime");
+        Double avgTAT = extractDouble(json, "averageTurnaroundTime");
+        return new Expected(order, avgWT, avgTAT);
+    }
+
     private static int extractInt(String json, String key, int fallback) {
         Matcher m = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*(\\d+)").matcher(json);
         return m.find() ? Integer.parseInt(m.group(1)) : fallback;
+    }
+
+    private static Double extractDouble(String json, String key) {
+        Matcher m = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").matcher(json);
+        return m.find() ? Double.parseDouble(m.group(1)) : null;
+    }
+
+    private static List<String> extractStringArray(String json, String key) {
+        Matcher m = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*\\[([^\\]]*)\\]").matcher(json);
+        if (!m.find()) return null;
+        String inside = m.group(1).trim();
+        if (inside.isEmpty()) return new ArrayList<>();
+        String[] parts = inside.split(",");
+        ArrayList<String> out = new ArrayList<>();
+        for (String p : parts) {
+            String s = p.trim().replace("\"", "");
+            if (!s.isEmpty()) out.add(s);
+        }
+        return out;
     }
 
     private static List<File> collectJsonFiles(String[] args) {

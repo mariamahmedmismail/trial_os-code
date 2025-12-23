@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
  * }
  */
 public class PreemptivePriorityAging {
+    private static final double EPS = 0.01;
 
     static final class Process {
         final String name;
@@ -63,6 +64,30 @@ public class PreemptivePriorityAging {
         }
     }
 
+    static final class Expected {
+        final List<String> executionOrder; // null if not present
+        final Double avgWT;                // null if not present
+        final Double avgTAT;               // null if not present
+
+        Expected(List<String> executionOrder, Double avgWT, Double avgTAT) {
+            this.executionOrder = executionOrder;
+            this.avgWT = avgWT;
+            this.avgTAT = avgTAT;
+        }
+    }
+
+    static final class Result {
+        final List<String> executionOrder;
+        final double avgWT;
+        final double avgTAT;
+
+        Result(List<String> executionOrder, double avgWT, double avgTAT) {
+            this.executionOrder = executionOrder;
+            this.avgWT = avgWT;
+            this.avgTAT = avgTAT;
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         List<File> files = collectJsonFiles(args);
         if (files.isEmpty()) {
@@ -74,13 +99,15 @@ public class PreemptivePriorityAging {
         for (File f : files) {
             String json = new String(Files.readAllBytes(Paths.get(f.getAbsolutePath())));
             Input in = parse(json);
+            Expected expected = parseExpected(json);
             System.out.println("\n=== " + f.getName() + " ===");
-            solve(in.processes, in.agingInterval, in.contextSwitch);
+            Result actual = solve(in.processes, in.agingInterval, in.contextSwitch);
+            printPassFail(expected, actual);
         }
     }
 
     // ------------------ Scheduling ------------------
-    private static void solve(List<Process> processes, int agingInterval, int contextSwitchTime) {
+    private static Result solve(List<Process> processes, int agingInterval, int contextSwitchTime) {
         processes.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
 
         ArrayList<Process> ready = new ArrayList<>();
@@ -187,7 +214,7 @@ public class PreemptivePriorityAging {
             }
         }
 
-        print(processes, executionOrder);
+        return print(processes, executionOrder);
     }
 
     private static void record(List<String> order, String name) {
@@ -208,7 +235,7 @@ public class PreemptivePriorityAging {
         return best;
     }
 
-    private static void print(List<Process> processes, List<String> order) {
+    private static Result print(List<Process> processes, List<String> order) {
         int totalWT = 0, totalTAT = 0;
         int n = processes.size();
 
@@ -223,8 +250,39 @@ public class PreemptivePriorityAging {
             totalTAT += tat;
             System.out.println("{name: " + p.name + ", waitingTime: " + wt + ", turnaroundTime: " + tat + "}");
         }
-        System.out.printf("averageWaitingTime: %.2f%n", (double) totalWT / n);
-        System.out.printf("averageTurnaroundTime: %.2f%n", (double) totalTAT / n);
+        double avgWT = (double) totalWT / n;
+        double avgTAT = (double) totalTAT / n;
+        System.out.printf("averageWaitingTime: %.2f%n", avgWT);
+        System.out.printf("averageTurnaroundTime: %.2f%n", avgTAT);
+        return new Result(order, avgWT, avgTAT);
+    }
+
+    private static void printPassFail(Expected expected, Result actual) {
+        if (expected.executionOrder == null && expected.avgWT == null && expected.avgTAT == null) {
+            System.out.println("testStatus: (no expected output in JSON)");
+            return;
+        }
+
+        boolean ok = true;
+        if (expected.executionOrder != null && !expected.executionOrder.equals(actual.executionOrder)) ok = false;
+        if (expected.avgWT != null && Math.abs(expected.avgWT - actual.avgWT) > EPS) ok = false;
+        if (expected.avgTAT != null && Math.abs(expected.avgTAT - actual.avgTAT) > EPS) ok = false;
+
+        System.out.println("testStatus: " + (ok ? "PASSED" : "FAILED"));
+        if (!ok) {
+            if (expected.executionOrder != null) {
+                System.out.println("  expected executionOrder: " + expected.executionOrder);
+                System.out.println("  actual   executionOrder: " + actual.executionOrder);
+            }
+            if (expected.avgWT != null) {
+                System.out.printf("  expected averageWaitingTime: %.2f%n", expected.avgWT);
+                System.out.printf("  actual   averageWaitingTime: %.2f%n", actual.avgWT);
+            }
+            if (expected.avgTAT != null) {
+                System.out.printf("  expected averageTurnaroundTime: %.2f%n", expected.avgTAT);
+                System.out.printf("  actual   averageTurnaroundTime: %.2f%n", actual.avgTAT);
+            }
+        }
     }
 
     // ------------------ JSON parsing (regex-based) ------------------
@@ -251,9 +309,35 @@ public class PreemptivePriorityAging {
         return new Input(contextSwitch, agingInterval, processes);
     }
 
+    private static Expected parseExpected(String json) {
+        List<String> order = extractStringArray(json, "executionOrder");
+        Double avgWT = extractDouble(json, "averageWaitingTime");
+        Double avgTAT = extractDouble(json, "averageTurnaroundTime");
+        return new Expected(order, avgWT, avgTAT);
+    }
+
     private static int extractInt(String json, String key, int fallback) {
         Matcher m = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*(\\d+)").matcher(json);
         return m.find() ? Integer.parseInt(m.group(1)) : fallback;
+    }
+
+    private static Double extractDouble(String json, String key) {
+        Matcher m = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").matcher(json);
+        return m.find() ? Double.parseDouble(m.group(1)) : null;
+    }
+
+    private static List<String> extractStringArray(String json, String key) {
+        Matcher m = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*\\[([^\\]]*)\\]").matcher(json);
+        if (!m.find()) return null;
+        String inside = m.group(1).trim();
+        if (inside.isEmpty()) return new ArrayList<>();
+        String[] parts = inside.split(",");
+        ArrayList<String> out = new ArrayList<>();
+        for (String p : parts) {
+            String s = p.trim().replace("\"", "");
+            if (!s.isEmpty()) out.add(s);
+        }
+        return out;
     }
 
     private static List<File> collectJsonFiles(String[] args) {
