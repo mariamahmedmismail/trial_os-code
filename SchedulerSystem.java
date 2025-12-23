@@ -135,113 +135,56 @@ public class SchedulerSystem {
 
     // ======================= SJF (Preemptive SRTF) =======================
     private static Result solveSJF(List<Process> processes, int contextSwitch) {
-        // Align with the SJFScheduler logic provided by the user:
-        // - Maintain "allProcesses" (pending arrivals) + readyQueue
-        // - Allow preemption when a newly arrived process has smaller remaining time
-        // - Context switch consumes time unit-by-unit and arrivals are checked during CS
-        // - Run in chunks until the next arrival time (or completion)
-        processes.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
+        // Match the user's SJFPreemptive.simulateSJF logic exactly:
+        // - At each time unit, build "ready" by scanning all processes with arrival<=time and remaining>0
+        // - Choose shortest remaining time, tie by arrival (stable sort keeps original order beyond that)
+        // - If CPU switches from one process to another, add full contextSwitch time as a jump (no arrival checks during CS)
+        // - Log executionOrder only when CPU switches (running != selected). No dedup helper.
 
-        ArrayList<Process> allProcesses = new ArrayList<>(processes);
-        ArrayList<Process> readyQueue = new ArrayList<>();
         ArrayList<String> order = new ArrayList<>();
 
-        int currentTime = 0;
-        Process currentProcess = null;
-        String lastCpuProcessName = null;
-
+        int time = 0;
         int completed = 0;
+        Process running = null;
 
-        while (!allProcesses.isEmpty() || !readyQueue.isEmpty() || currentProcess != null) {
-            // handleArrivals()
-            Iterator<Process> it = allProcesses.iterator();
-            while (it.hasNext()) {
-                Process p = it.next();
-                if (p.arrival <= currentTime) {
-                    readyQueue.add(p);
-                    it.remove();
-                }
-            }
-
-            if (currentProcess != null) {
-                Process shortestInQueue = shortestRemaining(readyQueue);
-                if (shortestInQueue != null && shortestInQueue.remaining < currentProcess.remaining) {
-                    readyQueue.add(currentProcess);
-                    currentProcess = null;
-                }
-            }
-
-            if (currentProcess == null) {
-                Process shortestInQueue = shortestRemaining(readyQueue);
-                if (shortestInQueue != null) {
-                    Process nextProcess = shortestInQueue;
-
-                    if (contextSwitch > 0
-                        && lastCpuProcessName != null
-                        && !lastCpuProcessName.equals(nextProcess.name)) {
-                        for (int iCs = 0; iCs < contextSwitch; iCs++) {
-                            currentTime++;
-                            // handleArrivals() during CS
-                            Iterator<Process> itCs = allProcesses.iterator();
-                            while (itCs.hasNext()) {
-                                Process p = itCs.next();
-                                if (p.arrival <= currentTime) {
-                                    readyQueue.add(p);
-                                    itCs.remove();
-                                }
-                            }
-                        }
-                    }
-
-                    currentProcess = nextProcess;
-                    readyQueue.remove(currentProcess);
-                    record(order, currentProcess.name);
-                } else {
-                    if (allProcesses.isEmpty()) break;
-                    int nextArrival = allProcesses.get(0).arrival;
-                    currentTime = Math.max(currentTime, nextArrival);
-                    lastCpuProcessName = null;
-                    continue;
-                }
-            }
-
-            int timeToNextArrival = -1;
-            if (!allProcesses.isEmpty()) {
-                timeToNextArrival = allProcesses.get(0).arrival - currentTime;
-            }
-
-            int executionDuration = currentProcess.remaining;
-            if (timeToNextArrival > 0) executionDuration = Math.min(executionDuration, timeToNextArrival);
-
-            currentProcess.remaining -= executionDuration;
-            currentTime += executionDuration;
-            lastCpuProcessName = currentProcess.name;
-
-            if (currentProcess.remaining == 0) {
-                currentProcess.completionTime = currentTime;
-                completed++;
-                currentProcess = null;
-            }
-        }
-
-        // Ensure all completion times exist (should, but keep safety)
-        if (completed != processes.size()) {
-            // if something went wrong, mark unfinished as completed at current time
+        while (completed < processes.size()) {
+            ArrayList<Process> ready = new ArrayList<>();
             for (Process p : processes) {
-                if (p.completionTime == null) p.completionTime = currentTime;
+                if (p.arrival <= time && p.remaining > 0) ready.add(p);
+            }
+
+            if (ready.isEmpty()) {
+                time++;
+                continue;
+            }
+
+            ready.sort(
+                Comparator.comparingInt((Process p) -> p.remaining)
+                    .thenComparingInt(p -> p.arrival)
+            );
+
+            Process selected = ready.get(0);
+
+            if (running != null && running != selected) {
+                time += Math.max(0, contextSwitch);
+            }
+
+            if (running != selected) {
+                order.add(selected.name);
+            }
+
+            running = selected;
+            running.remaining--;
+            time++;
+
+            if (running.remaining == 0) {
+                running.completionTime = time;
+                completed++;
+                running = null;
             }
         }
 
         return printStats(processes, order);
-    }
-
-    private static Process shortestRemaining(List<Process> list) {
-        if (list.isEmpty()) return null;
-        Process shortest = list.get(0);
-        for (Process p : list) {
-            if (p.remaining < shortest.remaining) shortest = p;
-        }
-        return shortest;
     }
 
     // ======================= Round Robin =======================
