@@ -1,9 +1,4 @@
-import java.io.File;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 class Process {
     String processName;
@@ -11,11 +6,15 @@ class Process {
     int executionDuration;
     int processpriority;
     int quantumTime;
+
     int remainingExecutiontime;
     int remainingquantumTime;
+
     int waitingTime;
     int turnaroundTime;
     int completionTime;
+
+    boolean addedToQueue = false;                 // IMPORTANT (reference logic)
     List<Integer> quantumTimeHistory;
 
     public Process(String processName, int arrivalTimeSlot, int executionDuration, int processpriority, int quantumTime) {
@@ -24,8 +23,10 @@ class Process {
         this.executionDuration = executionDuration;
         this.processpriority = processpriority;
         this.quantumTime = quantumTime;
+
         this.remainingExecutiontime = executionDuration;
         this.remainingquantumTime = quantumTime;
+
         this.quantumTimeHistory = new ArrayList<>();
         this.quantumTimeHistory.add(quantumTime);
     }
@@ -36,12 +37,29 @@ class Process {
         this.executionDuration = p.executionDuration;
         this.processpriority = p.processpriority;
         this.quantumTime = p.quantumTime;
+
         this.remainingExecutiontime = p.remainingExecutiontime;
         this.remainingquantumTime = p.remainingquantumTime;
+
         this.waitingTime = p.waitingTime;
         this.turnaroundTime = p.turnaroundTime;
         this.completionTime = p.completionTime;
+
+        this.addedToQueue = p.addedToQueue;
         this.quantumTimeHistory = new ArrayList<>(p.quantumTimeHistory);
+    }
+
+    public void reset() {
+        this.remainingExecutiontime = this.executionDuration;
+        this.remainingquantumTime = this.quantumTime;
+        this.waitingTime = 0;
+        this.turnaroundTime = 0;
+        this.completionTime = 0;
+        this.addedToQueue = false;
+
+        // keep only initial quantum in history
+        this.quantumTimeHistory = new ArrayList<>();
+        this.quantumTimeHistory.add(this.quantumTime);
     }
 }
 
@@ -58,291 +76,378 @@ class executionPeriod {
 }
 
 public class AGScheduler {
-    private List<Process> totalProcesses;
-    private List<executionPeriod> executionSequence;
-    public List<String> executionOrderNames = new ArrayList<>(); // Helper for testing
-    private int contextSwitch;
+
+    enum PickMode { FCFS, PRIORITY, SJF }
+
+    private final List<Process> totalProcesses;
+    private final List<executionPeriod> executionSequence;
+    private final int contextSwitch;
 
     public AGScheduler(List<Process> totalProcesses, int contextSwitch) {
         this.totalProcesses = new ArrayList<>();
-        for (Process p : totalProcesses) {
-            this.totalProcesses.add(new Process(p));
-        }
+        for (Process p : totalProcesses) this.totalProcesses.add(new Process(p));
         this.executionSequence = new ArrayList<>();
         this.contextSwitch = contextSwitch;
     }
 
-    public void simulate() {
-        Queue<Process> readyQueue = new LinkedList<>();
-        List<Process> allProcesses = new ArrayList<>(totalProcesses);
-        int currentTime = 0;
-        Process runningProcess = null;
-        int quantumTimeUsed = 0;
-        
-        // Helper to track order for validation
-        String lastRecordedName = null;
-
-        allProcesses.sort(Comparator.comparingInt(p -> p.arrivalTimeSlot));
-
-        while (!allProcesses.isEmpty() || !readyQueue.isEmpty() || runningProcess != null) {
-            Iterator<Process> iterator = allProcesses.iterator();
-            while (iterator.hasNext()) {
-                Process p = iterator.next();
-                if (p.arrivalTimeSlot <= currentTime) {
-                    readyQueue.offer(p);
-                    iterator.remove();
-                }
-            }
-
-            if (runningProcess == null && !readyQueue.isEmpty()) {
-                if (currentTime > 0 && executionSequence.size() > 0) {
-                    currentTime += contextSwitch;
-                }
-                runningProcess = readyQueue.poll();
-                quantumTimeUsed = 0;
-                runningProcess.remainingquantumTime = runningProcess.quantumTime;
-                
-                // Track execution order
-                if(lastRecordedName == null || !lastRecordedName.equals(runningProcess.processName)) {
-                    executionOrderNames.add(runningProcess.processName);
-                    lastRecordedName = runningProcess.processName;
-                }
-            }
-
-            if (runningProcess != null) {
-                int startTime = currentTime;
-                
-                // Track execution order (in case of immediate switch back)
-                if(lastRecordedName == null || !lastRecordedName.equals(runningProcess.processName)) {
-                    executionOrderNames.add(runningProcess.processName);
-                    lastRecordedName = runningProcess.processName;
-                }
-
-                int phase1Limit = (int) Math.ceil(runningProcess.quantumTime * 0.25);
-                int phase2Limit = (int) Math.ceil(runningProcess.quantumTime * 0.5);
-
-                if (quantumTimeUsed < phase1Limit) {
-                    // PHASE 1: FCFS
-                    int timeInPhase = Math.min(
-                            runningProcess.remainingExecutiontime,
-                            Math.min(runningProcess.remainingquantumTime, phase1Limit - quantumTimeUsed)
-                    );
-                    currentTime += timeInPhase;
-                    runningProcess.remainingExecutiontime -= timeInPhase;
-                    runningProcess.remainingquantumTime -= timeInPhase;
-                    quantumTimeUsed += timeInPhase;
-                    executionSequence.add(new executionPeriod(runningProcess.processName, startTime, currentTime));
-
-                } else if (quantumTimeUsed < phase2Limit) {
-                    // PHASE 2: Priority
-                    int timeInPhase = Math.min(
-                            runningProcess.remainingExecutiontime,
-                            Math.min(runningProcess.remainingquantumTime, phase2Limit - quantumTimeUsed)
-                    );
-                    currentTime += timeInPhase;
-                    runningProcess.remainingExecutiontime -= timeInPhase;
-                    runningProcess.remainingquantumTime -= timeInPhase;
-                    quantumTimeUsed += timeInPhase;
-                    executionSequence.add(new executionPeriod(runningProcess.processName, startTime, currentTime));
-
-                } else {
-                    // PHASE 3: SJF
-                    Process shorterJob = null;
-                    for (Process p : readyQueue) {
-                        if (p.remainingExecutiontime < runningProcess.remainingExecutiontime) {
-                            if (shorterJob == null || p.remainingExecutiontime < shorterJob.remainingExecutiontime) {
-                                shorterJob = p;
-                            }
-                        }
-                    }
-
-                    if (shorterJob != null) {
-                        int timeExecuted = 1;
-                        currentTime += timeExecuted;
-                        runningProcess.remainingExecutiontime -= timeExecuted;
-                        runningProcess.remainingquantumTime -= timeExecuted;
-                        quantumTimeUsed += timeExecuted;
-                        executionSequence.add(new executionPeriod(runningProcess.processName, startTime, currentTime));
-
-                        int remainingQ = runningProcess.remainingquantumTime;
-                        runningProcess.quantumTime += remainingQ;
-                        runningProcess.quantumTimeHistory.add(runningProcess.quantumTime);
-                        readyQueue.offer(runningProcess);
-
-                        runningProcess = null;
-                        quantumTimeUsed = 0;
-                        continue;
-                    }
-
-                    int timeInPhase = Math.min(runningProcess.remainingExecutiontime, runningProcess.remainingquantumTime);
-                    currentTime += timeInPhase;
-                    runningProcess.remainingExecutiontime -= timeInPhase;
-                    runningProcess.remainingquantumTime -= timeInPhase;
-                    quantumTimeUsed += timeInPhase;
-                    executionSequence.add(new executionPeriod(runningProcess.processName, startTime, currentTime));
-                }
-
-                if (runningProcess.remainingExecutiontime == 0) {
-                    runningProcess.completionTime = currentTime;
-                    runningProcess.quantumTime = 0;
-                    runningProcess.quantumTimeHistory.add(0);
-                    runningProcess.turnaroundTime = runningProcess.completionTime - runningProcess.arrivalTimeSlot;
-                    runningProcess.waitingTime = runningProcess.turnaroundTime - runningProcess.executionDuration;
-                    runningProcess = null;
-                    quantumTimeUsed = 0;
-                } else if (runningProcess.remainingquantumTime == 0) {
-                    runningProcess.quantumTime += 2;
-                    runningProcess.quantumTimeHistory.add(runningProcess.quantumTime);
-                    readyQueue.offer(runningProcess);
-                    runningProcess = null;
-                    quantumTimeUsed = 0;
-                }
-
-            } else {
-                if (!allProcesses.isEmpty()) {
-                    currentTime = allProcesses.get(0).arrivalTimeSlot;
-                } else {
-                    break;
-                }
+    // ===== reference addArrivals =====
+    private void addArrivals(List<Process> processes, Queue<Process> readyQueue, int currentTime) {
+        for (Process p : processes) {
+            if (!p.addedToQueue && p.arrivalTimeSlot <= currentTime) {
+                readyQueue.add(p);
+                p.addedToQueue = true;
             }
         }
     }
 
-    public double getAverageWaitingTime() {
-        return totalProcesses.stream().mapToInt(p -> p.waitingTime).average().orElse(0.0);
+    // ===== record execution order (no duplicates) =====
+    private void recordOrder(List<String> order, Process p) {
+        if (order.isEmpty() || !order.get(order.size() - 1).equals(p.processName)) {
+            order.add(p.processName);
+        }
     }
 
-    public double getAverageTurnaroundTime() {
-        return totalProcesses.stream().mapToInt(p -> p.turnaroundTime).average().orElse(0.0);
+    // ===== timeline record (merge consecutive same process) =====
+    private void recordTimeline(String name, int start, int end) {
+        if (!executionSequence.isEmpty()) {
+            executionPeriod last = executionSequence.get(executionSequence.size() - 1);
+            if (last.processName.equals(name) && last.endTimeslot == start) {
+                last.endTimeslot = end;
+                return;
+            }
+        }
+        executionSequence.add(new executionPeriod(name, start, end));
+    }
+
+    public void simulate() {
+
+        // reset
+        for (Process p : totalProcesses) p.reset();
+
+        Queue<Process> readyQueue = new LinkedList<>();
+        List<String> executionOrder = new ArrayList<>();
+
+        PickMode nextPick = PickMode.FCFS;
+        int currentTime = 0;
+        int completed = 0;
+
+        while (completed < totalProcesses.size()) {
+
+            addArrivals(totalProcesses, readyQueue, currentTime);
+
+            if (readyQueue.isEmpty()) {
+                currentTime++;
+                continue;
+            }
+
+            // pick current
+            Process current;
+            if (nextPick == PickMode.FCFS) {
+                current = readyQueue.poll();
+            } else {
+                Process best = null;
+
+                if (nextPick == PickMode.PRIORITY) {
+                    int bestPr = Integer.MAX_VALUE;
+                    for (Process p : readyQueue) {
+                        if (p.processpriority < bestPr) {
+                            bestPr = p.processpriority;
+                            best = p;
+                        }
+                    }
+                } else { // SJF
+                    int bestRem = Integer.MAX_VALUE;
+                    for (Process p : readyQueue) {
+                        if (p.remainingExecutiontime < bestRem) {
+                            bestRem = p.remainingExecutiontime;
+                            best = p;
+                        }
+                    }
+                }
+
+                current = best;
+                readyQueue.remove(best);
+                nextPick = PickMode.FCFS;
+            }
+
+            // context switch when swapping to a new running segment
+            if (!executionSequence.isEmpty()) currentTime += contextSwitch;
+
+            // reset remaining quantum for this turn
+            current.remainingquantumTime = current.quantumTime;
+
+            recordOrder(executionOrder, current);
+
+            // ======================
+            // Phase 1: 25% FCFS
+            // ======================
+            int q1 = (int) Math.ceil(0.25 * current.quantumTime);
+            int c1 = 0;
+
+            while (c1 < q1 && current.remainingExecutiontime > 0 && current.remainingquantumTime > 0) {
+                int start = currentTime;
+
+                current.remainingExecutiontime--;
+                current.remainingquantumTime--;
+                currentTime++;
+                c1++;
+
+                recordTimeline(current.processName, start, currentTime);
+                addArrivals(totalProcesses, readyQueue, currentTime);
+            }
+
+            // Case IV finished
+            if (current.remainingExecutiontime == 0) {
+                current.completionTime = currentTime;
+                current.quantumTime = 0;
+                current.quantumTimeHistory.add(0);
+                completed++;
+                continue;
+            }
+
+            // Case I quantum ended
+            if (current.remainingquantumTime == 0) {
+                current.quantumTime += 2;
+                current.quantumTimeHistory.add(current.quantumTime);
+                readyQueue.add(current);
+                continue;
+            }
+
+            // ======================
+            // Phase 2: PRIORITY CHECK ONLY
+            // ======================
+            Process bestPriority = null;
+            int bestPr = Integer.MAX_VALUE;
+            for (Process p : readyQueue) {
+                if (p.processpriority < bestPr) {
+                    bestPr = p.processpriority;
+                    bestPriority = p;
+                }
+            }
+
+            // Case II (IMPORTANT FIX):
+            // add ceil(remainingQ/2) and DO NOT immediately switch
+            if (bestPriority != null && bestPriority.processpriority < current.processpriority) {
+                int addQ = (int) Math.ceil(current.remainingquantumTime / 2.0);
+                current.quantumTime += addQ;
+                current.quantumTimeHistory.add(current.quantumTime);
+
+                readyQueue.add(current);
+                nextPick = PickMode.PRIORITY;
+                continue;
+            }
+
+            // ======================
+            // Phase 2: execute another 25%
+            // ======================
+            int q2 = (int) Math.ceil(0.25 * current.quantumTime);
+            int c2 = 0;
+
+            while (c2 < q2 && current.remainingExecutiontime > 0 && current.remainingquantumTime > 0) {
+                int start = currentTime;
+
+                current.remainingExecutiontime--;
+                current.remainingquantumTime--;
+                currentTime++;
+                c2++;
+
+                recordTimeline(current.processName, start, currentTime);
+                addArrivals(totalProcesses, readyQueue, currentTime);
+            }
+
+            // Case IV finished
+            if (current.remainingExecutiontime == 0) {
+                current.completionTime = currentTime;
+                current.quantumTime = 0;
+                current.quantumTimeHistory.add(0);
+                completed++;
+                continue;
+            }
+
+            // Case I quantum ended
+            if (current.remainingquantumTime == 0) {
+                current.quantumTime += 2;
+                current.quantumTimeHistory.add(current.quantumTime);
+                readyQueue.add(current);
+                continue;
+            }
+
+            // ======================
+            // Phase 3: SJF preemptive
+            // ======================
+            while (current.remainingExecutiontime > 0 && current.remainingquantumTime > 0) {
+                addArrivals(totalProcesses, readyQueue, currentTime);
+
+                Process bestSJF = null;
+                int bestRem = Integer.MAX_VALUE;
+                for (Process p : readyQueue) {
+                    if (p.remainingExecutiontime < bestRem) {
+                        bestRem = p.remainingExecutiontime;
+                        bestSJF = p;
+                    }
+                }
+
+                // Case III (correct):
+                // add ALL remaining quantum and DO NOT immediately switch
+                if (bestSJF != null && bestSJF.remainingExecutiontime < current.remainingExecutiontime) {
+                    current.quantumTime += current.remainingquantumTime;
+                    current.quantumTimeHistory.add(current.quantumTime);
+
+                    readyQueue.add(current);
+                    nextPick = PickMode.SJF;
+                    break;
+                }
+
+                // execute 1 tick
+                int start = currentTime;
+
+                current.remainingExecutiontime--;
+                current.remainingquantumTime--;
+                currentTime++;
+
+                recordTimeline(current.processName, start, currentTime);
+            }
+
+            if (current.remainingExecutiontime == 0) {
+                current.completionTime = currentTime;
+                current.quantumTime = 0;
+                current.quantumTimeHistory.add(0);
+                completed++;
+            } else if (current.remainingquantumTime == 0) {
+                current.quantumTime += 2;
+                current.quantumTimeHistory.add(current.quantumTime);
+                readyQueue.add(current);
+            }
+        }
+
+        // compute WT/TAT
+        for (Process p : totalProcesses) {
+            p.turnaroundTime = p.completionTime - p.arrivalTimeSlot;
+            p.waitingTime = p.turnaroundTime - p.executionDuration;
+        }
     }
 
     public void printResults() {
         System.out.println("\n=== AG Scheduling Results ===\n");
-        System.out.println("Processes Execution Order: " + String.join(", ", executionOrderNames));
-        
+
+        System.out.println("Execution Order (from timeline segments):");
+        List<String> order = new ArrayList<>();
+        for (executionPeriod e : executionSequence) {
+            if (order.isEmpty() || !order.get(order.size() - 1).equals(e.processName)) {
+                order.add(e.processName);
+            }
+        }
+        System.out.println(order);
+
+        System.out.println("\nExecution Timeline:");
+        for (executionPeriod e : executionSequence) {
+            System.out.println(e.processName + " (Time " + e.startTimeslot + " - " + e.endTimeslot + ")");
+        }
+
         System.out.println("\n--- Process Details ---");
         for (Process p : totalProcesses) {
             System.out.println("\nProcess: " + p.processName);
             System.out.println("  Waiting Time: " + p.waitingTime);
             System.out.println("  Turnaround Time: " + p.turnaroundTime);
-            System.out.print("  Quantum History: ");
-            for (int i = 0; i < p.quantumTimeHistory.size(); i++) {
-                System.out.print(p.quantumTimeHistory.get(i));
-                if (i < p.quantumTimeHistory.size() - 1) System.out.print(" -> ");
-            }
-            System.out.println();
+            System.out.println("  Quantum History: " + p.quantumTimeHistory);
         }
+
+        double avgWT = totalProcesses.stream().mapToInt(x -> x.waitingTime).average().orElse(0.0);
+        double avgTAT = totalProcesses.stream().mapToInt(x -> x.turnaroundTime).average().orElse(0.0);
 
         System.out.println("\n--- Statistics ---");
-        System.out.printf("Average Waiting Time: %.2f\n", getAverageWaitingTime());
-        System.out.printf("Average Turnaround Time: %.2f\n", getAverageTurnaroundTime());
+        System.out.printf("Average Waiting Time: %.2f\n", avgWT);
+        System.out.printf("Average Turnaround Time: %.2f\n", avgTAT);
     }
 
-    // ==========================================
-    // MAIN METHOD: Handles both Interactive & Test Modes
-    // ==========================================
     public static void main(String[] args) {
-        
-        // 1. TEST MODE (If arguments are provided)
-        if (args.length > 0) {
-            runTestMode(args);
-            return;
-        }
+        int contextSwitch = 0;
 
-        // 2. INTERACTIVE MODE (Default)
-        Scanner scanner = new Scanner(System.in);
-        System.out.print("Enter number of processes: ");
-        int n = scanner.nextInt();
+        // Test Case 1
+        System.out.println("\n================ TEST CASE 1 ================");
+        List<Process> tc1 = Arrays.asList(
+                new Process("P1", 0, 17, 4, 7),
+                new Process("P2", 2, 6, 7, 9),
+                new Process("P3", 5, 11, 3, 4),
+                new Process("P4", 15, 4, 6, 6)
+        );
+        AGScheduler s1 = new AGScheduler(tc1, contextSwitch);
+        s1.simulate();
+        s1.printResults();
 
-        System.out.print("Enter context switching time: ");
-        int contextSwitch = scanner.nextInt();
+        // Test Case 2
+        System.out.println("\n================ TEST CASE 2 ================");
+        List<Process> tc2 = Arrays.asList(
+                new Process("P1", 0, 10, 3, 4),
+                new Process("P2", 0, 8, 1, 5),
+                new Process("P3", 0, 12, 2, 6),
+                new Process("P4", 0, 6, 4, 3),
+                new Process("P5", 0, 9, 5, 4)
+        );
+        AGScheduler s2 = new AGScheduler(tc2, contextSwitch);
+        s2.simulate();
+        s2.printResults();
 
-        List<Process> processes = new ArrayList<>();
+        // Test Case 3
+        System.out.println("\n================ TEST CASE 3 ================");
+        List<Process> tc3 = Arrays.asList(
+                new Process("P1", 0, 20, 5, 8),
+                new Process("P2", 3, 4, 3, 6),
+                new Process("P3", 6, 3, 4, 5),
+                new Process("P4", 10, 2, 2, 4),
+                new Process("P5", 15, 5, 6, 7),
+                new Process("P6", 20, 6, 1, 3)
+        );
+        AGScheduler s3 = new AGScheduler(tc3, contextSwitch);
+        s3.simulate();
+        s3.printResults();
+        System.out.println("\n================ TEST CASE 4 ================");
+    List<Process> tc4 = Arrays.asList(
+        new Process("P1", 0, 3, 2, 10),
+        new Process("P2", 2, 4, 3, 12),
+        new Process("P3", 5, 2, 1, 8),
+        new Process("P4", 8, 5, 4, 15),
+        new Process("P5", 12, 3, 5, 9)
+    );
 
-        for (int i = 0; i < n; i++) {
-            System.out.println("\nProcess " + (i + 1) + ":");
-            System.out.print("  Name: ");
-            String name = scanner.next();
-            System.out.print("  Arrival Time: ");
-            int arrival = scanner.nextInt();
-            System.out.print("  Burst Time: ");
-            int burst = scanner.nextInt();
-            System.out.print("  Priority: ");
-            int priority = scanner.nextInt();
-            System.out.print("  Quantum: ");
-            int quantum = scanner.nextInt();
+    AGScheduler s4 = new AGScheduler(tc4, contextSwitch);
+    s4.simulate();
+    s4.printResults();
 
-            processes.add(new Process(name, arrival, burst, priority, quantum));
-        }
+    // =======================
+    // TEST CASE 5
+    // =======================
+    System.out.println("\n================ TEST CASE 5 ================");
+    List<Process> tc5 = Arrays.asList(
+        new Process("P1", 0, 25, 3, 5),
+        new Process("P2", 1, 18, 2, 4),
+        new Process("P3", 3, 22, 4, 6),
+        new Process("P4", 5, 15, 1, 3),
+        new Process("P5", 8, 20, 5, 7),
+        new Process("P6", 12, 12, 6, 4)
+    );
 
-        AGScheduler scheduler = new AGScheduler(processes, contextSwitch);
-        scheduler.simulate();
-        scheduler.printResults();
-        scanner.close();
-    }
+    AGScheduler s5 = new AGScheduler(tc5, contextSwitch);
+    s5.simulate();
+    s5.printResults();
 
-    // ==========================================
-    // JSON PARSING & TESTING LOGIC (Hidden from User)
-    // ==========================================
-    private static void runTestMode(String[] args) {
-        List<String> testFiles = new ArrayList<>();
-        // Auto-detect if arg is a directory
-        File f = new File(args[0]);
-        if (f.isDirectory()) {
-            File[] files = f.listFiles((dir, name) -> name.endsWith(".json"));
-            if (files != null) for (File file : files) testFiles.add(file.getAbsolutePath());
-        } else {
-            testFiles.add(args[0]);
-        }
+    // =======================
+    // TEST CASE 6
+    // =======================
+    System.out.println("\n================ TEST CASE 6 ================");
+    List<Process> tc6 = Arrays.asList(
+        new Process("P1", 0, 14, 4, 6),
+        new Process("P2", 4, 9, 2, 8),
+        new Process("P3", 7, 16, 5, 5),
+        new Process("P4", 10, 7, 1, 10),
+        new Process("P5", 15, 11, 3, 4),
+        new Process("P6", 20, 5, 6, 7),
+        new Process("P7", 25, 8, 7, 9)
+    );
 
-        for (String testFile : testFiles) {
-            try {
-                System.out.println("Testing: " + testFile);
-                String content = new String(Files.readAllBytes(Paths.get(testFile)));
-                
-                // Parse Context Switch
-                int contextSwitch = 0;
-                Matcher csMatcher = Pattern.compile("\"contextSwitch\":\\s*(\\d+)").matcher(content);
-                if (csMatcher.find()) contextSwitch = Integer.parseInt(csMatcher.group(1));
+    AGScheduler s6 = new AGScheduler(tc6, contextSwitch);
+    s6.simulate();
+    s6.printResults();
 
-                // Parse Processes
-                List<Process> processes = new ArrayList<>();
-                Pattern procPattern = Pattern.compile("\\{\"name\":\\s*\"(P\\d+)\",\\s*\"arrival\":\\s*(\\d+),\\s*\"burst\":\\s*(\\d+),\\s*\"priority\":\\s*(\\d+),\\s*\"quantum\":\\s*(\\d+)\\}");
-                Matcher procMatcher = procPattern.matcher(content);
-                while (procMatcher.find()) {
-                    processes.add(new Process(
-                            procMatcher.group(1),
-                            Integer.parseInt(procMatcher.group(2)),
-                            Integer.parseInt(procMatcher.group(3)),
-                            Integer.parseInt(procMatcher.group(4)),
-                            Integer.parseInt(procMatcher.group(5))
-                    ));
-                }
-
-                // Run Scheduler
-                AGScheduler scheduler = new AGScheduler(processes, contextSwitch);
-                scheduler.simulate();
-
-                // Validate
-                double actualAvgWT = scheduler.getAverageWaitingTime();
-                double actualAvgTAT = scheduler.getAverageTurnaroundTime();
-                
-                // Parse Expected
-                double expectedAvgWT = 0, expectedAvgTAT = 0;
-                Matcher avgWTMatcher = Pattern.compile("\"averageWaitingTime\":\\s*([\\d.]+)").matcher(content);
-                if (avgWTMatcher.find()) expectedAvgWT = Double.parseDouble(avgWTMatcher.group(1));
-                Matcher avgTATMatcher = Pattern.compile("\"averageTurnaroundTime\":\\s*([\\d.]+)").matcher(content);
-                if (avgTATMatcher.find()) expectedAvgTAT = Double.parseDouble(avgTATMatcher.group(1));
-
-                if (Math.abs(actualAvgWT - expectedAvgWT) < 0.1 && Math.abs(actualAvgTAT - expectedAvgTAT) < 0.1) {
-                    System.out.println("STATUS: PASSED");
-                } else {
-                    System.out.println("STATUS: FAILED (Expected WT: " + expectedAvgWT + ", Got: " + actualAvgWT + ")");
-                }
-
-            } catch (Exception e) {
-                System.err.println("Error processing file: " + e.getMessage());
-            }
-        }
     }
 }
