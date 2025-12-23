@@ -5,8 +5,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -132,58 +135,113 @@ public class SchedulerSystem {
 
     // ======================= SJF (Preemptive SRTF) =======================
     private static Result solveSJF(List<Process> processes, int contextSwitch) {
-        // This implementation is aligned with the user's reference code:
-        // - ready is rebuilt each second by scanning all processes with arrival<=time
-        // - if current != next, context switch time is added as a jump
-        // - executionOrder records when the dispatched process changes
+        // Align with the SJFScheduler logic provided by the user:
+        // - Maintain "allProcesses" (pending arrivals) + readyQueue
+        // - Allow preemption when a newly arrived process has smaller remaining time
+        // - Context switch consumes time unit-by-unit and arrivals are checked during CS
+        // - Run in chunks until the next arrival time (or completion)
         processes.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
+
+        ArrayList<Process> allProcesses = new ArrayList<>(processes);
+        ArrayList<Process> readyQueue = new ArrayList<>();
         ArrayList<String> order = new ArrayList<>();
 
-        int time = 0;
-        int completed = 0;
-        Process current = null;
+        int currentTime = 0;
+        Process currentProcess = null;
+        String lastCpuProcessName = null;
 
-        while (completed < processes.size()) {
-            ArrayList<Process> ready = new ArrayList<>();
-            for (Process p : processes) {
-                if (p.arrival <= time && p.remaining > 0) {
-                    ready.add(p);
+        int completed = 0;
+
+        while (!allProcesses.isEmpty() || !readyQueue.isEmpty() || currentProcess != null) {
+            // handleArrivals()
+            Iterator<Process> it = allProcesses.iterator();
+            while (it.hasNext()) {
+                Process p = it.next();
+                if (p.arrival <= currentTime) {
+                    readyQueue.add(p);
+                    it.remove();
                 }
             }
 
-            if (ready.isEmpty()) {
-                time++;
-                continue;
+            if (currentProcess != null) {
+                Process shortestInQueue = shortestRemaining(readyQueue);
+                if (shortestInQueue != null && shortestInQueue.remaining < currentProcess.remaining) {
+                    readyQueue.add(currentProcess);
+                    currentProcess = null;
+                }
             }
 
-            ready.sort(
-                Comparator.comparingInt((Process p) -> p.remaining)
-                    .thenComparingInt(p -> p.arrival)
-                    .thenComparing(p -> p.name)
-            );
+            if (currentProcess == null) {
+                Process shortestInQueue = shortestRemaining(readyQueue);
+                if (shortestInQueue != null) {
+                    Process nextProcess = shortestInQueue;
 
-            Process next = ready.get(0);
+                    if (contextSwitch > 0
+                        && lastCpuProcessName != null
+                        && !lastCpuProcessName.equals(nextProcess.name)) {
+                        for (int iCs = 0; iCs < contextSwitch; iCs++) {
+                            currentTime++;
+                            // handleArrivals() during CS
+                            Iterator<Process> itCs = allProcesses.iterator();
+                            while (itCs.hasNext()) {
+                                Process p = itCs.next();
+                                if (p.arrival <= currentTime) {
+                                    readyQueue.add(p);
+                                    itCs.remove();
+                                }
+                            }
+                        }
+                    }
 
-            if (current != null && current != next) {
-                time += Math.max(0, contextSwitch);
+                    currentProcess = nextProcess;
+                    readyQueue.remove(currentProcess);
+                    record(order, currentProcess.name);
+                } else {
+                    if (allProcesses.isEmpty()) break;
+                    int nextArrival = allProcesses.get(0).arrival;
+                    currentTime = Math.max(currentTime, nextArrival);
+                    lastCpuProcessName = null;
+                    continue;
+                }
             }
 
-            if (current != next) {
-                record(order, next.name);
+            int timeToNextArrival = -1;
+            if (!allProcesses.isEmpty()) {
+                timeToNextArrival = allProcesses.get(0).arrival - currentTime;
             }
 
-            current = next;
-            current.remaining--;
-            time++;
+            int executionDuration = currentProcess.remaining;
+            if (timeToNextArrival > 0) executionDuration = Math.min(executionDuration, timeToNextArrival);
 
-            if (current.remaining == 0) {
-                current.completionTime = time;
+            currentProcess.remaining -= executionDuration;
+            currentTime += executionDuration;
+            lastCpuProcessName = currentProcess.name;
+
+            if (currentProcess.remaining == 0) {
+                currentProcess.completionTime = currentTime;
                 completed++;
-                current = null;
+                currentProcess = null;
+            }
+        }
+
+        // Ensure all completion times exist (should, but keep safety)
+        if (completed != processes.size()) {
+            // if something went wrong, mark unfinished as completed at current time
+            for (Process p : processes) {
+                if (p.completionTime == null) p.completionTime = currentTime;
             }
         }
 
         return printStats(processes, order);
+    }
+
+    private static Process shortestRemaining(List<Process> list) {
+        if (list.isEmpty()) return null;
+        Process shortest = list.get(0);
+        for (Process p : list) {
+            if (p.remaining < shortest.remaining) shortest = p;
+        }
+        return shortest;
     }
 
     // ======================= Round Robin =======================
@@ -245,126 +303,172 @@ public class SchedulerSystem {
 
     // ======================= Priority (Preemptive + Aging) =======================
     private static Result solvePriorityAging(List<Process> processes, int agingInterval, int contextSwitchTime) {
+        // Align with the PriorityScheduler logic provided by the user:
+        // - effectivePriorities map and waitStartTimes map
+        // - currentProcess stays in readyQueue while running
+        // - aging can reduce multiple levels at once: priorityBoost = timeInQueue/agingInterval
+        // - preempt if a process has priority <= current priority (as implemented in user's code)
         processes.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
 
-        ArrayList<Process> ready = new ArrayList<>();
-        ArrayList<String> executionOrder = new ArrayList<>();
+        ArrayList<Process> allProcesses = new ArrayList<>(processes);
+        ArrayList<Process> readyQueue = new ArrayList<>();
+        ArrayList<Process> finished = new ArrayList<>();
+        ArrayList<String> order = new ArrayList<>();
 
-        int time = 0;
-        int completed = 0;
-        int nextArrivalIdx = 0;
-        boolean hasEverRun = false;
+        Map<String, Integer> effectivePriorities = new HashMap<>();
+        Map<String, Integer> waitStartTimes = new HashMap<>();
 
-        Process running = null; // executing now
-        Process target = null;  // chosen process, still switching
-        int csRemaining = 0;
+        allProcesses.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
 
-        while (completed < processes.size()) {
-            // 1) arrivals at exact time
-            while (nextArrivalIdx < processes.size() && processes.get(nextArrivalIdx).arrival == time) {
-                Process p = processes.get(nextArrivalIdx);
-                p.newPriority = p.basePriority;
-                p.newArrival = time;
-                ready.add(p);
-                nextArrivalIdx++;
-            }
+        for (Process p : allProcesses) {
+            effectivePriorities.put(p.name, p.basePriority);
+            waitStartTimes.put(p.name, -1);
+            p.remaining = p.burst;
+        }
 
-            // 2) per-process aging at exact time (ready only)
-            if (agingInterval > 0) {
-                for (Process p : ready) {
-                    int waited = time - p.newArrival;
-                    if (waited >= agingInterval && p.newPriority > 1) {
-                        p.newPriority = Math.max(1, p.newPriority - 1);
-                        p.newArrival = time;
+        List<Process> pendingArrivals = new ArrayList<>(allProcesses);
+
+        Process currentProcess = null;
+        String lastExecutedProcessName = null;
+
+        int currentTime = 0;
+
+        while (true) {
+            checkArrivalsPriority(readyQueue, pendingArrivals, waitStartTimes, currentTime);
+            updatePriorityAging(readyQueue, currentProcess, currentTime, agingInterval, effectivePriorities, waitStartTimes);
+
+            // handle preemption
+            if (currentProcess != null && !readyQueue.isEmpty()) {
+                if (readyQueue.contains(currentProcess)) {
+                    Process highestPriorityInQueue = getHighestPriorityProcess(readyQueue, effectivePriorities);
+
+                    int curPrio = effectivePriorities.get(currentProcess.name);
+                    int highPrio = effectivePriorities.get(highestPriorityInQueue.name);
+
+                    if (highestPriorityInQueue != currentProcess && highPrio <= curPrio) {
+                        if (!currentProcess.name.equals(highestPriorityInQueue.name)) {
+                            currentTime += contextSwitchTime;
+                            record(order, currentProcess.name);
+                            checkArrivalsPriority(readyQueue, pendingArrivals, waitStartTimes, currentTime);
+                            updatePriorityAging(readyQueue, currentProcess, currentTime, agingInterval, effectivePriorities, waitStartTimes);
+                        }
+
+                        waitStartTimes.put(currentProcess.name, currentTime - contextSwitchTime);
+                        currentProcess = getHighestPriorityProcess(readyQueue, effectivePriorities);
+
+                        if (highestPriorityInQueue != currentProcess) currentTime += contextSwitchTime;
                     }
                 }
             }
 
-            // 3) if currently switching to a target, re-check each second and replace if needed
-            if (running == null && target != null) {
-                Process best = bestPriority(ready);
-                if (best != null && comparePriority(best, target) < 0) {
-                    target.newArrival = time;
-                    ready.add(target);
+            // select if CPU idle
+            if (currentProcess == null && !readyQueue.isEmpty()) {
+                Process highestPriorityInQueue = getHighestPriorityProcess(readyQueue, effectivePriorities);
 
-                    ready.remove(best);
-                    target = best;
-                    csRemaining = contextSwitchTime;
-                    record(executionOrder, target.name);
+                if (lastExecutedProcessName != null && !lastExecutedProcessName.equals(highestPriorityInQueue.name)) {
+                    currentTime += contextSwitchTime;
+                    record(order, highestPriorityInQueue.name);
+                    checkArrivalsPriority(readyQueue, pendingArrivals, waitStartTimes, currentTime);
+                    updatePriorityAging(readyQueue, currentProcess, currentTime, agingInterval, effectivePriorities, waitStartTimes);
                 }
+
+                currentProcess = getHighestPriorityProcess(readyQueue, effectivePriorities);
+
+                if (highestPriorityInQueue != currentProcess) currentTime += contextSwitchTime;
+
+                checkArrivalsPriority(readyQueue, pendingArrivals, waitStartTimes, currentTime);
+                updatePriorityAging(readyQueue, currentProcess, currentTime, agingInterval, effectivePriorities, waitStartTimes);
             }
 
-            // 4) preemption check while running
-            if (running != null) {
-                Process best = bestPriority(ready);
-                if (best != null && comparePriority(best, running) < 0) {
-                    running.newArrival = time;
-                    ready.add(running);
-                    running = null;
+            // termination / time jump
+            if (currentProcess == null) {
+                if (finished.size() == allProcesses.size()) break;
 
-                    ready.remove(best);
-                    target = best;
-                    csRemaining = contextSwitchTime;
-                    record(executionOrder, target.name);
-                }
+                int nextTime = Integer.MAX_VALUE;
+                if (!pendingArrivals.isEmpty()) nextTime = pendingArrivals.get(0).arrival;
+
+                if (nextTime != Integer.MAX_VALUE && nextTime > currentTime) currentTime = nextTime;
+                else currentTime++;
+
+                continue;
             }
 
-            // 5) if CPU idle and not switching, choose next
-            if (running == null && csRemaining == 0 && target == null) {
-                Process next = bestPriority(ready);
-                if (next != null) {
-                    ready.remove(next);
-                    if (!hasEverRun) {
-                        running = next; // first dispatch has no CS
-                        hasEverRun = true;
-                        record(executionOrder, running.name);
-                    } else {
-                        target = next;
-                        csRemaining = contextSwitchTime;
-                        record(executionOrder, target.name);
-                    }
-                }
-            }
+            // execute 1 unit
+            record(order, currentProcess.name);
+            currentProcess.remaining--;
+            waitStartTimes.put(currentProcess.name, -1);
+            currentTime++;
 
-            // 6) if CS finished, start target after checks at this time
-            if (running == null && csRemaining == 0 && target != null) {
-                running = target;
-                target = null;
-                hasEverRun = true;
-            }
-
-            // 7) consume 1 second: run OR CS OR idle
-            if (running != null) {
-                running.remaining--;
-                time++;
-                if (running.remaining == 0) {
-                    running.completionTime = time;
-                    completed++;
-                    running = null;
-                }
-            } else if (csRemaining > 0) {
-                csRemaining--;
-                time++;
+            if (currentProcess.remaining == 0) {
+                currentProcess.completionTime = currentTime;
+                finished.add(currentProcess);
+                readyQueue.remove(currentProcess);
+                lastExecutedProcessName = currentProcess.name;
+                currentProcess = null;
             } else {
-                time++;
+                lastExecutedProcessName = currentProcess.name;
             }
         }
 
-        return printStats(processes, executionOrder);
+        return printStats(processes, order);
     }
 
-    private static int comparePriority(Process a, Process b) {
-        if (a.newPriority != b.newPriority) return Integer.compare(a.newPriority, b.newPriority);
-        if (a.arrival != b.arrival) return Integer.compare(a.arrival, b.arrival);
-        return a.name.compareTo(b.name);
-    }
-
-    private static Process bestPriority(List<Process> ready) {
-        Process best = null;
-        for (Process p : ready) {
-            if (best == null || comparePriority(p, best) < 0) best = p;
+    private static void checkArrivalsPriority(
+        List<Process> readyQueue,
+        List<Process> pending,
+        Map<String, Integer> waitStartTimes,
+        int time
+    ) {
+        Iterator<Process> it = pending.iterator();
+        while (it.hasNext()) {
+            Process p = it.next();
+            if (p.arrival <= time) {
+                if (!readyQueue.contains(p)) {
+                    readyQueue.add(p);
+                    waitStartTimes.put(p.name, p.arrival);
+                }
+                it.remove();
+            }
         }
-        return best;
+    }
+
+    private static void updatePriorityAging(
+        List<Process> readyQueue,
+        Process current,
+        int time,
+        int agingInterval,
+        Map<String, Integer> effectivePriorities,
+        Map<String, Integer> waitStartTimes
+    ) {
+        if (agingInterval <= 0) return;
+
+        for (Process p : readyQueue) {
+            if (p == current) continue;
+            int start = waitStartTimes.get(p.name);
+            if (start == -1) continue;
+
+            int timeInQueue = time - start;
+            if (timeInQueue >= agingInterval) {
+                int priorityBoost = timeInQueue / agingInterval;
+                int currentPrio = effectivePriorities.get(p.name);
+                int newPrio = Math.max(1, currentPrio - priorityBoost);
+                effectivePriorities.put(p.name, newPrio);
+                waitStartTimes.put(p.name, time);
+            }
+        }
+    }
+
+    private static Process getHighestPriorityProcess(List<Process> readyQueue, Map<String, Integer> effectivePriorities) {
+        if (readyQueue.isEmpty()) return null;
+        Process highest = readyQueue.get(0);
+        for (Process p : readyQueue) {
+            int highPrio = effectivePriorities.get(highest.name);
+            int pPrio = effectivePriorities.get(p.name);
+            if (pPrio < highPrio || (pPrio == highPrio && p.arrival < highest.arrival)) {
+                highest = p;
+            }
+        }
+        return highest;
     }
 
     // ======================= Shared printing + validation =======================
