@@ -1,0 +1,21 @@
+{
+  "name": "Test Case 1: Basic mixed arrivals",
+  "input": {
+    "contextSwitch": 1,
+    "rrQuantum": 2,
+    "agingInterval": 5,
+    "processes": [
+      {"name": "P1", "arrival": 0, "burst": 8, "priority": 3},
+      {"name": "P2", "arrival": 1, "burst": 4, "priority": 1},
+      {"name": "P3", "arrival": 2, "burst": 2, "priority": 4},
+      {"name": "P4", "arrival": 3, "burst": 1, "priority": 2},
+      {"name": "P5", "arrival": 4, "burst": 3, "priority": 5}
+    ]
+  },
+  "SJF": {
+    "executionOrder": ["P1", "P2", "P4", "P3", "P2", "P5", "P1"],
+    "averageWaitingTime": 7.4,
+    "averageTurnaroundTime": 11.0
+  }
+}
+

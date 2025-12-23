@@ -139,7 +139,8 @@ public class SchedulerSystem {
         // - Build ready list each second by scanning all processes
         // - Choose shortest remaining time (tie by arrival)
         // - If CPU switches, add context switch as a single time jump
-        // - DO NOT process arrivals during context switch
+        //   IMPORTANT: also count CS after a process finishes (previous != selected)
+        // - DO NOT process arrivals during context switch (they appear automatically since we scan by arrival<=time)
         // - Record executionOrder only when CPU switches
 
         ArrayList<String> executionOrder = new ArrayList<>();
@@ -147,6 +148,7 @@ public class SchedulerSystem {
         int time = 0;
         int completed = 0;
         Process running = null;
+        Process lastOnCpu = null; // used to charge CS even after completion
 
         while (completed < processes.size()) {
             ArrayList<Process> ready = new ArrayList<>();
@@ -167,11 +169,11 @@ public class SchedulerSystem {
             Process selected = ready.get(0);
 
             // context switch jump (no arrival processing inside)
-            if (running != null && running != selected) {
+            if (lastOnCpu != null && lastOnCpu != selected) {
                 time += Math.max(0, contextSwitch);
             }
 
-            if (running != selected) {
+            if (lastOnCpu != selected) {
                 executionOrder.add(selected.name);
             }
 
@@ -182,7 +184,10 @@ public class SchedulerSystem {
             if (running.remaining == 0) {
                 running.completionTime = time;
                 completed++;
+                lastOnCpu = running;
                 running = null;
+            } else {
+                lastOnCpu = running;
             }
         }
 
