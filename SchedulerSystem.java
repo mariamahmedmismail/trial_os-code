@@ -40,7 +40,7 @@ public class SchedulerSystem {
         int newPriority;
         int newArrival;
 
-        Integer completionTime;
+        Integer completionTime; // finish time
 
         Process(String name, int arrival, int burst, int priority) {
             this.name = name;
@@ -132,172 +132,111 @@ public class SchedulerSystem {
 
     // ======================= SJF (Preemptive SRTF) =======================
     private static Result solveSJF(List<Process> processes, int contextSwitch) {
+        // This implementation is aligned with the user's reference code:
+        // - ready is rebuilt each second by scanning all processes with arrival<=time
+        // - if current != next, context switch time is added as a jump
+        // - executionOrder records when the dispatched process changes
         processes.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
         ArrayList<String> order = new ArrayList<>();
 
         int time = 0;
         int completed = 0;
-        int idx = 0;
-        ArrayList<Process> ready = new ArrayList<>();
-
-        Process running = null;
-        boolean hasEverRun = false;
-        int csLeft = 0;
-        Process target = null;
+        Process current = null;
 
         while (completed < processes.size()) {
-            // arrivals at exact time
-            while (idx < processes.size() && processes.get(idx).arrival == time) {
-                ready.add(processes.get(idx));
-                idx++;
+            ArrayList<Process> ready = new ArrayList<>();
+            for (Process p : processes) {
+                if (p.arrival <= time && p.remaining > 0) {
+                    ready.add(p);
+                }
             }
 
-            // if switching, do not run; just wait out CS (but still accept arrivals each second)
-            if (csLeft > 0) {
-                csLeft--;
+            if (ready.isEmpty()) {
                 time++;
                 continue;
             }
 
-            // choose best (shortest remaining; ties by arrival then name)
-            Process best = bestSrtf(ready);
-            if (running == null) {
-                if (best == null) {
-                    time++;
-                    continue;
-                }
-                ready.remove(best);
-                running = best;
-                record(order, running.name);
-                hasEverRun = true;
-            } else {
-                // preempt if best has smaller remaining than running
-                if (best != null && best.remaining < running.remaining) {
-                    // put running back
-                    ready.add(running);
-                    running = null;
-                    // start switching to best (unless it's the very first dispatch)
-                    ready.remove(best);
-                    target = best;
-                    if (hasEverRun && contextSwitch > 0) {
-                        csLeft = contextSwitch;
-                    }
-                    // when CS ends, start target
-                }
+            ready.sort(
+                Comparator.comparingInt((Process p) -> p.remaining)
+                    .thenComparingInt(p -> p.arrival)
+                    .thenComparing(p -> p.name)
+            );
+
+            Process next = ready.get(0);
+
+            if (current != null && current != next) {
+                time += Math.max(0, contextSwitch);
             }
 
-            if (running == null && target != null && csLeft == 0) {
-                running = target;
-                target = null;
-                record(order, running.name);
-                hasEverRun = true;
+            if (current != next) {
+                record(order, next.name);
             }
 
-            if (running == null) {
-                time++;
-                continue;
-            }
-
-            // execute 1 unit
-            running.remaining--;
+            current = next;
+            current.remaining--;
             time++;
 
-            if (running.remaining == 0) {
-                running.completionTime = time;
+            if (current.remaining == 0) {
+                current.completionTime = time;
                 completed++;
-                running = null;
-                // if something is ready, next switch will cost CS when it changes; handled by selection above
+                current = null;
             }
         }
 
         return printStats(processes, order);
     }
 
-    private static Process bestSrtf(List<Process> ready) {
-        Process best = null;
-        for (Process p : ready) {
-            if (best == null
-                || p.remaining < best.remaining
-                || (p.remaining == best.remaining && p.arrival < best.arrival)
-                || (p.remaining == best.remaining && p.arrival == best.arrival && p.name.compareTo(best.name) < 0)) {
-                best = p;
-            }
-        }
-        return best;
-    }
-
     // ======================= Round Robin =======================
     private static Result solveRR(List<Process> processes, int contextSwitch, int quantum) {
+        // This implementation is aligned with the user's reference code:
+        // - arrivals are added whenever arrival<=time (using an index on a sorted list)
+        // - context switch time is added as a jump when CPU switches between different processes
+        // - executionOrder records every dispatch (consecutive duplicates are still suppressed via record())
         if (quantum <= 0) quantum = 1;
+
         processes.sort(Comparator.comparingInt((Process p) -> p.arrival).thenComparing(p -> p.name));
-
         ArrayList<String> order = new ArrayList<>();
-        Deque<Process> q = new ArrayDeque<>();
-        Set<Process> inQueue = new HashSet<>();
 
+        Deque<Process> queue = new ArrayDeque<>();
         int time = 0;
+        int index = 0;
         int completed = 0;
-        int idx = 0;
-
-        Process running = null;
-        int qUsed = 0;
-        int csLeft = 0;
+        Process current = null;
 
         while (completed < processes.size()) {
-            // arrivals up to current time
-            while (idx < processes.size() && processes.get(idx).arrival <= time) {
-                Process p = processes.get(idx);
-                if (p.remaining > 0 && p != running && !inQueue.contains(p)) {
-                    q.addLast(p);
-                    inQueue.add(p);
-                }
-                idx++;
+            while (index < processes.size() && processes.get(index).arrival <= time) {
+                queue.addLast(processes.get(index));
+                index++;
             }
 
-            if (csLeft > 0) {
-                csLeft--;
+            if (queue.isEmpty()) {
                 time++;
                 continue;
             }
 
-            if (running == null) {
-                if (q.isEmpty()) {
-                    time++;
-                    continue;
-                }
-                running = q.removeFirst();
-                inQueue.remove(running);
-                qUsed = 0;
-                record(order, running.name);
+            Process p = queue.removeFirst();
+
+            if (current != null && current != p) {
+                time += Math.max(0, contextSwitch);
             }
 
-            // run 1 unit
-            running.remaining--;
-            qUsed++;
-            time++;
+            record(order, p.name);
+            current = p;
 
-            // accept arrivals after 1 tick
-            while (idx < processes.size() && processes.get(idx).arrival <= time) {
-                Process p = processes.get(idx);
-                if (p.remaining > 0 && p != running && !inQueue.contains(p)) {
-                    q.addLast(p);
-                    inQueue.add(p);
-                }
-                idx++;
+            int run = Math.min(quantum, p.remaining);
+            p.remaining -= run;
+            time += run;
+
+            while (index < processes.size() && processes.get(index).arrival <= time) {
+                queue.addLast(processes.get(index));
+                index++;
             }
 
-            if (running.remaining == 0) {
-                running.completionTime = time;
+            if (p.remaining > 0) {
+                queue.addLast(p);
+            } else {
+                p.completionTime = time;
                 completed++;
-                running = null;
-                qUsed = 0;
-                if (!q.isEmpty() && contextSwitch > 0) csLeft = contextSwitch;
-            } else if (qUsed >= quantum) {
-                q.addLast(running);
-                inQueue.add(running);
-                running = null;
-                qUsed = 0;
-                if (contextSwitch > 0) csLeft = contextSwitch;
             }
         }
 
