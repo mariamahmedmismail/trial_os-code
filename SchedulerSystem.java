@@ -197,7 +197,6 @@ public class SchedulerSystem {
                     if (allProcesses.isEmpty()) break;
                     int nextArrival = allProcesses.get(0).arrival;
                     currentTime = Math.max(currentTime, nextArrival);
-                    lastCpuProcessName = null;
                     continue;
                 }
             }
